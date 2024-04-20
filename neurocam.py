@@ -5,6 +5,7 @@ import requests
 import base64
 import time
 import json
+import queue
 from enum import Enum, auto
 from dotenv import load_dotenv
 from picamera2 import Picamera2
@@ -253,53 +254,59 @@ class Vision:
             )
             return None
 
+
 class Camera:
-    """
-    A class to manage the camera operations.
-
-    Attributes:
-        camera (Picamera2): The camera object.
-        vision (Vision): The Vision object to process images.
-    """
-
     def __init__(self):
+        self.frame_queue = queue.Queue(maxsize=10)
         self.camera = Picamera2()
         self.stream_config = self.camera.create_preview_configuration(
-            main={"format": "RGB888", "size": (FRAME_WIDTH, FRAME_HEIGHT)}
+            main={"format": "RGB888", "size": (640, 480)}
         )
         self.camera.configure(self.stream_config)
         self.camera.start()
+        self.running = True
+
         self.label = 0
         self.pred_boxes = []
+
         self.terminator_vision = False
 
-        self.t1 = threading.Thread(target=self.show_window)
-        self.t1.start()
+        threading.Thread(target=self.capture_frames).start()
+        threading.Thread(target=self.show_window).start()
+
+    def capture_frames(self):
+        while self.running:
+            frame = self.camera.capture_array()
+            if not self.frame_queue.full():
+                self.frame_queue.put(frame)
 
     def get_frame(self):
-        """Capture and resize an image from the camera."""
-        frame = self.camera.capture_array()
-        frame = cv2.resize(frame, (TARGET_WIDTH, TARGET_HEIGHT))
-        return frame
+        return self.frame_queue.get()
 
-    def get_input_array(self, target_width=TARGET_WIDTH, target_height=TARGET_HEIGHT):
-        input_array = self.camera.capture_array()
-        resized_array = cv2.resize(input_array, (target_width, target_height))
-        expanded_array = np.expand_dims(resized_array, axis=0)
-        int8_array = expanded_array.astype("uint8")
-        return int8_array
+    def get_input_array(self, target_width, target_height):
+        frame = self.frame_queue.get()
+        if frame is not None:
+            processed_frame = self.process_frame(frame, target_width, target_height)
+            return processed_frame
 
     def show_window(self):
-        """Display the camera output and handle user interactions."""
-        while True:
-            frame = self.render_boxes(self.camera.capture_array())
-            cv2.imshow("frame", frame)
-            if cv2.getWindowProperty("frame", cv2.WND_PROP_VISIBLE) < 1:
-                break
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break  # Exit the loop if 'q' is pressed
-        cv2.destroyAllWindows()
+        while self.running:
+            frame = self.render_boxes(self.get_frame())
+
+            if frame is not None:
+                cv2.imshow("Frame", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    self.running = False
+
+    def process_frame(self, frame, target_width, target_height):
+        if frame is not None:
+            resized_array = cv2.resize(frame, (target_width, target_height))
+            expanded_array = np.expand_dims(resized_array, axis=0)
+            int8_array = expanded_array.astype("uint8")
+            return int8_array
+
+    def set_pred_boxes(self, pred_boxes):
+        self.pred_boxes = pred_boxes
 
     @staticmethod
     def apply_terminator_vision(input_array):
@@ -365,9 +372,6 @@ class Camera:
                 )
 
         return frame
-
-    def set_pred_boxes(self, pred_boxes):
-        self.pred_boxes = pred_boxes
 
 
 class YOLOInference:
@@ -446,6 +450,7 @@ class VWWInference:
     def set_active(self):
         print("VWW Active")
         self.active = True
+        self.camera.set_pred_boxes([])
         self.person_detected = False
         self.map_hardware()
 
@@ -484,8 +489,8 @@ class Sentry:
     def __init__(self):
         self.camera = Camera()
         self.vision = Vision(OPENAI_API_KEY)
-        self.vww_inference = VWWInference(self.camera, show_stats=False)
-        self.yolo_inference = YOLOInference(self.camera, ANCHORS, show_stats=False)
+        self.vww_inference = VWWInference(self.camera)
+        self.yolo_inference = YOLOInference(self.camera, ANCHORS)
         self.security_level = SecurityLevel.LOW
         self.timer = None
         self.report_timer = None
@@ -505,11 +510,8 @@ class Sentry:
                     self.set_security_level(SecurityLevel.HIGH)
                     self.start_security_report_timer()
 
-                # Reset timer to keep security level high as long as person is detected
-                if self.timer:
-                    self.timer.cancel()
-                self.timer = threading.Timer(30, self.reset_security_level)
-                self.timer.start()
+                    self.timer = threading.Timer(30, self.reset_security_level)
+                    self.timer.start()
 
             time.sleep(1)
 
@@ -523,12 +525,10 @@ class Sentry:
         self.report_timer.start()
 
     def generate_security_report(self):
-        # Continue to generate reports every 5 seconds
         self.get_security_report()
-        self.start_security_report_timer()
 
     def get_security_report(self):
-        report = self.vision.ask_openai(self.camera.camera.capture_array())
+        report = self.vision.ask_openai(self.camera.get_frame())
         if report:
             security_report = SecurityReport(report["args"])
             security_report.display()
@@ -540,10 +540,12 @@ class Sentry:
 
     def reset_security_level(self):
         # Reset the security level and swap to VWW detection
-        self.yolo_inference.pred_boxes = []
+        self.vww_inference.person_detected = False
+        print(f"Security Level reset to {SecurityLevel.LOW}")
         self.set_security_level(SecurityLevel.LOW)
-        self.vww_inference.set_active()
         self.yolo_inference.set_inactive()
+        self.yolo_inference.pred_boxes = []
+        self.vww_inference.set_active()
         if self.report_timer:
             self.report_timer.cancel()
 
