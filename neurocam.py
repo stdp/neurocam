@@ -404,6 +404,7 @@ class YOLOInference:
             if self.show_stats:
                 device.soc.power_measurement_enabled = True
             self.model.map(device, hw_only=True)
+            print("Yolo mapped to Akida device")
 
     def infer(self):
         while True:
@@ -463,6 +464,7 @@ class VWWInference:
             if self.show_stats:
                 device.soc.power_measurement_enabled = True
             self.model.map(device, hw_only=True)
+            print("VWW mapped to Akida device")
 
     def infer(self):
         while True:
