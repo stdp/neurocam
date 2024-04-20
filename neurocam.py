@@ -47,7 +47,7 @@ PERSON = "person"
 LABELS = [CAR, PERSON]
 COLOURS = {
     CAR: (255, 0, 0),
-    PERSON: (0, 255, 0),
+    PERSON: (255, 255, 255),
 }
 ANCHORS = [
     [0.56658, 1.05302],
@@ -251,8 +251,7 @@ class Vision:
             error_message = (
                 response.json().get("error", {}).get("message", "Unknown error")
             )
-            raise Exception(f"Failed to get response from OpenAI API: {error_message}")
-
+            return None
 
 class Camera:
     """
@@ -272,6 +271,7 @@ class Camera:
         self.camera.start()
         self.label = 0
         self.pred_boxes = []
+        self.terminator_vision = False
 
         self.t1 = threading.Thread(target=self.show_window)
         self.t1.start()
@@ -301,6 +301,36 @@ class Camera:
                 break  # Exit the loop if 'q' is pressed
         cv2.destroyAllWindows()
 
+    @staticmethod
+    def apply_terminator_vision(input_array):
+        """
+        Applies a Terminator-style vision effect to an input image array.
+
+        Args:
+        input_array (numpy.ndarray): The input image array in BGR format.
+
+        Returns:
+        numpy.ndarray: The image with the Terminator vision effect applied.
+        """
+        if input_array is None:
+            print("Error: No input image provided.")
+            return None
+
+        # Ensure the input is in float format for manipulation
+        image = input_array.astype(float)
+
+        # Reduce the contributions of the blue and green channels to emphasize red
+        image[:, :, 0] *= 0.2  # Reduce blue channel
+        image[:, :, 1] *= 0.2  # Reduce green channel
+
+        # Clip the values to be in the valid range [0, 255] and convert back to uint8
+        image = np.clip(image, 0, 255).astype(np.uint8)
+
+        # Optionally apply a color map for additional styling (e.g., heat map)
+        terminator_vision_image = cv2.applyColorMap(image, cv2.COLORMAP_HOT)
+
+        return terminator_vision_image
+
     def render_boxes(self, frame):
         """
         Draw bounding boxes around detected objects in the frame.
@@ -311,6 +341,10 @@ class Camera:
         Returns:
             array: The frame with bounding boxes drawn.
         """
+
+        if self.terminator_vision:
+            frame = self.apply_terminator_vision(frame)
+
         for box in self.pred_boxes:
             if box[5] > PREDICTION_CONFIDENCE_MIN:
                 x1, y1 = int(box[0]), int(box[1])
@@ -323,8 +357,8 @@ class Camera:
                     frame,
                     "{} - {}".format(label, score),
                     (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
+                    cv2.FONT_HERSHEY_COMPLEX_SMALL,
+                    0.4,
                     colour,
                     1,
                     cv2.LINE_AA,
@@ -352,10 +386,12 @@ class YOLOInference:
     def set_active(self):
         print("YOLO Active")
         self.active = True
+        self.camera.terminator_vision = True
         self.map_hardware()
 
     def set_inactive(self):
         self.active = False
+        self.camera.terminator_vision = False
         self.pred_boxes = []
 
     def map_hardware(self):
@@ -449,7 +485,7 @@ class Sentry:
         self.camera = Camera()
         self.vision = Vision(OPENAI_API_KEY)
         self.vww_inference = VWWInference(self.camera, show_stats=False)
-        self.yolo_inference = YOLOInference(self.camera, ANCHORS, show_stats=True)
+        self.yolo_inference = YOLOInference(self.camera, ANCHORS, show_stats=False)
         self.security_level = SecurityLevel.LOW
         self.timer = None
         self.report_timer = None
@@ -462,7 +498,6 @@ class Sentry:
     def monitor(self):
         while self.running:
             if self.vww_inference.person_detected:
-                print("Person detected")
                 # Disable VWW and enable YOLO when a person is detected
                 if not self.yolo_inference.active:
                     self.vww_inference.set_inactive()
@@ -494,8 +529,9 @@ class Sentry:
 
     def get_security_report(self):
         report = self.vision.ask_openai(self.camera.camera.capture_array())
-        security_report = SecurityReport(report["args"])
-        security_report.display()
+        if report:
+            security_report = SecurityReport(report["args"])
+            security_report.display()
 
     def set_security_level(self, level):
         if self.security_level != level:
@@ -504,6 +540,7 @@ class Sentry:
 
     def reset_security_level(self):
         # Reset the security level and swap to VWW detection
+        self.yolo_inference.pred_boxes = []
         self.set_security_level(SecurityLevel.LOW)
         self.vww_inference.set_active()
         self.yolo_inference.set_inactive()
