@@ -30,6 +30,8 @@ The system runs the Visual Wake Word model for low power monitoring of a feed. W
 - Python 3.8 or higher
 - A stable internet connection for setup and API interactions with ChatGPT
 
+![Akida Neuromorphic SoC](https://i.imgur.com/g8YCnaX.jpeg)
+
 ## Installation
 
 ### Setup the Hardware
