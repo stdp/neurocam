@@ -6,7 +6,7 @@ import base64
 import time
 import json
 from enum import Enum, auto
-
+from dotenv import load_dotenv
 from picamera2 import Picamera2
 
 from akida import Model as AkidaModel, devices
@@ -15,9 +15,11 @@ from akida_models.detection.processing import (
 )
 import numpy as np
 
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+load_dotenv()
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 if OPENAI_API_KEY is None:
-    print("API Key not found. Please set the OPENAI_API_KEY environment variable.")
+    print("Please set the OPENAI_API_KEY environment variable.")
 else:
     print(f"Loaded API Key")
 
@@ -453,6 +455,8 @@ class Sentry:
         self.report_timer = None
         self.running = True
 
+        self.vww_inference.set_active()
+
         threading.Thread(target=self.monitor, daemon=True).start()
 
     def monitor(self):
@@ -489,8 +493,8 @@ class Sentry:
         self.start_security_report_timer()
 
     def get_security_report(self):
-        report = self.vision.ask_openai(self.camera.capture_array())
-        security_report = SecurityReport(report)
+        report = self.vision.ask_openai(self.camera.camera.capture_array())
+        security_report = SecurityReport(report["args"])
         security_report.display()
 
     def set_security_level(self, level):
