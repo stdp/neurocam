@@ -28,21 +28,21 @@ The system runs the Visual Wake Word model for low power monitoring of a feed. W
 
 ## Prerequisites
 - Raspberry Pi 4 Compute Model with an IO Board
-- PCI-e Akida Neuromorphic Processor ([link](https://shop.brainchipinc.com/products/akida%E2%84%A2-development-kit-pcie-board))>
+- PCI-e Akida Neuromorphic Processor [link](https://shop.brainchipinc.com/products/akida%E2%84%A2-development-kit-pcie-board)
 - Raspberry Pi Camera Module
-- WS2812 compatible RGB LEDs ([link])(https://core-electronics.com.au/neopixel-stick-8-x-ws2812-5050-rgb-led-with-integrated-drivers.html)
+- WS2812 compatible RGB LEDs [link](https://core-electronics.com.au/neopixel-stick-8-x-ws2812-5050-rgb-led-with-integrated-drivers.html)
 - Python 3.8 or higher
 - A stable internet connection for setup and API interactions with ChatGPT
 
 ![Akida Neuromorphic SoC](https://i.imgur.com/g8YCnaX.jpeg)
 
-![WS2812 compatible RGB LEDs](https://i.imgur.com/2DBmrLc.png)
+![WS2812 compatible RGB LEDs](https://i.imgur.com/zg9xneM.png)
 
 ## Installation
 
 ### Setup the Hardware
 1. Connect the Raspberry Pi Camera to the Raspberry Pi 4 Compute Model.
-2. Ensure the Akida Neuromorphic Processor is correctly installed in the PCI-e slot on the IO Board and the drivers are installed. ([link to instructions])(https://brainchip.com/support-akida-pcie-board/)
+2. Ensure the Akida Neuromorphic Processor is correctly installed in the PCI-e slot on the IO Board and the drivers are installed. ([link to instructions])(https://brainchip.com/support-akida-pcie-board)
 3. Conect the WS2812 compatible RGB LED's wiring to the 5v, GROUND and GPIO 18
 
 ### Prepare the Software Environment
