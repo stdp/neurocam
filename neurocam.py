@@ -9,6 +9,7 @@ import queue
 from enum import Enum, auto
 from dotenv import load_dotenv
 from picamera2 import Picamera2
+from rpi_ws281x import PixelStrip, Color
 
 from akida import Model as AkidaModel, devices
 from akida_models.detection.processing import (
@@ -24,39 +25,55 @@ if OPENAI_API_KEY is None:
 else:
     print(f"Loaded API Key")
 
+LED_PIN = 18
+NUM_LEDS = 8
+
 CAMERA_SRC = 0
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
+TERMINATOR_VISION_ENABLED = True
+SECURITY_RESET_TIMEOUT = 60
+REPORT_EVERY_X_SECONDS = 10
 
-INFERENCE_PER_SECOND = 2
-PREDICTION_CONFIDENCE_MIN = 0.6
-VWW_THRESHOLD = 0.5
-
-TARGET_WIDTH = 224
-TARGET_HEIGHT = 224
+YOLO_CONFIDENCE_MIN = 0.6
+VWW_CONFIDENCE_THRESHOLD = 0.5
 
 YOLO = "yolo"
+YOLO_FACE = "yolo_face"
 VWW = "vww"
-YOLO_FBZ = "models/yolo.fbz"
-VWW_FBZ = "models/vww.fbz"
-NUM_ANCHORS = 5
-GRID_SIZE = (7, 7)
-NUM_CLASSES = 2
 
-CAR = "car"
-PERSON = "person"
-LABELS = [CAR, PERSON]
-COLOURS = {
-    CAR: (255, 0, 0),
-    PERSON: (255, 255, 255),
+INITIAL_YOLO_MODEL = YOLO_FACE
+
+YOLO_SETTINGS = {
+    YOLO: {
+        "model_file": f"models/{YOLO}.fbz",
+        "grid_size": (7, 7),
+        "anchors": [
+            [0.56658, 1.05302],
+            [1.09512, 2.04102],
+            [2.39016, 3.01487],
+            [2.46033, 4.92333],
+            [5.17334, 5.56817],
+        ],
+        "num_classes": 2,
+        "labels": ["car", "person"],
+        "colours": {
+            "car": (0, 0, 0),
+            "person": (255, 255, 255),
+        }
+    },
+    YOLO_FACE: {
+        "model_file": f"models/{YOLO_FACE}.fbz",
+        "grid_size": (7, 7),
+        "anchors": [[0.90751, 1.49967], [1.63565, 2.43559], [2.93423, 3.88108]],
+        "num_classes": 1,
+        "labels": ["face"],
+        "colours": {
+            "face": (255, 255, 255)
+        }
+    }
 }
-ANCHORS = [
-    [0.56658, 1.05302],
-    [1.09512, 2.04102],
-    [2.39016, 3.01487],
-    [2.46033, 4.92333],
-    [5.17334, 5.56817],
-]
+
 
 SYSTEM_PROMPT = """
 You are an advanced Raspberry Pi-based security system, equipped with neuromorphic hardware 
@@ -73,6 +90,66 @@ identifying any unusual or suspicious behaviors, attire that may be inappropriat
 season, distinguishing features such as tattoos or scars, and any objects they might be carrying that 
 could be of security concern. Evaluate how these observations could relate to security protocols.
 """
+
+
+class WS2812Controller:
+    def __init__(self, pin, num_leds):
+        """
+        Initialize the WS2812 RGB LED controller.
+
+        Args:
+        pin (int): The GPIO pin connected to the data input of the LEDs.
+        num_leds (int): Number of LEDs in the strip.
+        """
+        self.num_leds = num_leds
+        self.strip = PixelStrip(num_leds, pin)
+        self.strip.begin()
+        self.alarm_active = False
+        self.cleanup()
+
+        threading.Thread(target=self.alarm, daemon=True).start()
+
+    def start_alarm(self):
+        self.alarm_active = True
+
+    def stop_alarm(self):
+        self.alarm_active = False
+        self.cleanup()
+
+    def alarm(self):
+        """
+        Flash LEDs in blue and red colors rapidly.
+
+        Args:
+        duration (float): Total duration of the flashing in seconds.
+        """
+
+        while True:
+            if self.alarm_active:
+                self._flash_colors(Color(255, 0, 0), Color(0, 0, 255))
+            time.sleep(0.01)
+
+    def _flash_colors(self, color1, color2):
+        """
+        Helper method to flash two colors alternately.
+
+        Args:
+        color1, color2 (int): Colors to flash.
+        interval (float): Time interval to hold each color.
+        """
+        for color in (color1, color2):
+            for i in range(self.num_leds):
+                self.strip.setPixelColor(i, color)
+            self.strip.show()
+            time.sleep(0.1)
+
+    def cleanup(self):
+        """
+        Clean up by turning off all LEDs.
+        """
+        for i in range(self.num_leds):
+            self.strip.setPixelColor(i, Color(0, 0, 0))
+        self.strip.show()
 
 
 class SecurityLevel(Enum):
@@ -230,6 +307,7 @@ class Vision:
         """
         base64_image = self.encode_image_to_base64(image_data)
         payload = self.construct_payload(base64_image)
+        print("Requested security report from ChatGPT")
         response = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers=self.headers,
@@ -257,7 +335,7 @@ class Vision:
 
 class Camera:
     def __init__(self):
-        self.frame_queue = queue.Queue(maxsize=10)
+        self.frame_queue = queue.Queue(maxsize=30)
         self.camera = Picamera2()
         self.stream_config = self.camera.create_preview_configuration(
             main={"format": "RGB888", "size": (640, 480)}
@@ -268,11 +346,12 @@ class Camera:
 
         self.label = 0
         self.pred_boxes = []
+        self.yolo_model = INITIAL_YOLO_MODEL
 
         self.terminator_vision = False
 
-        threading.Thread(target=self.capture_frames).start()
-        threading.Thread(target=self.show_window).start()
+        threading.Thread(target=self.capture_frames, daemon=True).start()
+        threading.Thread(target=self.show_window, daemon=True).start()
 
     def capture_frames(self):
         while self.running:
@@ -291,10 +370,15 @@ class Camera:
 
     def show_window(self):
         while self.running:
-            frame = self.render_boxes(self.get_frame())
+            frame = self.get_frame()
 
             if frame is not None:
-                cv2.imshow("Frame", frame)
+                if TERMINATOR_VISION_ENABLED and self.terminator_vision:
+                    frame = self.apply_terminator_vision(frame)
+
+                frame = self.render_boxes(frame)
+
+                cv2.imshow("Neurocam", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     self.running = False
 
@@ -323,18 +407,12 @@ class Camera:
             print("Error: No input image provided.")
             return None
 
-        # Ensure the input is in float format for manipulation
-        image = input_array.astype(float)
+        # Scale down the blue and green channels directly in uint8 avoiding overflow
+        input_array[:, :, 0] = np.floor_divide(input_array[:, :, 0], 5)  # Reduce blue channel
+        input_array[:, :, 1] = np.floor_divide(input_array[:, :, 1], 5)  # Reduce green channel
 
-        # Reduce the contributions of the blue and green channels to emphasize red
-        image[:, :, 0] *= 0.2  # Reduce blue channel
-        image[:, :, 1] *= 0.2  # Reduce green channel
-
-        # Clip the values to be in the valid range [0, 255] and convert back to uint8
-        image = np.clip(image, 0, 255).astype(np.uint8)
-
-        # Optionally apply a color map for additional styling (e.g., heat map)
-        terminator_vision_image = cv2.applyColorMap(image, cv2.COLORMAP_HOT)
+        # Apply a color map for additional styling (e.g., heat map)
+        terminator_vision_image = cv2.applyColorMap(input_array, cv2.COLORMAP_HOT)
 
         return terminator_vision_image
 
@@ -348,17 +426,13 @@ class Camera:
         Returns:
             array: The frame with bounding boxes drawn.
         """
-
-        if self.terminator_vision:
-            frame = self.apply_terminator_vision(frame)
-
         for box in self.pred_boxes:
-            if box[5] > PREDICTION_CONFIDENCE_MIN:
+            if box[5] > YOLO_CONFIDENCE_MIN:
                 x1, y1 = int(box[0]), int(box[1])
                 x2, y2 = int(box[2]), int(box[3])
-                label = LABELS[int(box[4])]
+                label = YOLO_SETTINGS[self.yolo_model]["labels"][int(box[4])]
                 score = "{:.2%}".format(box[5])
-                colour = COLOURS[label]
+                colour = YOLO_SETTINGS[self.yolo_model]["colours"][label]
                 frame = cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 1)
                 cv2.putText(
                     frame,
@@ -375,20 +449,22 @@ class Camera:
 
 
 class YOLOInference:
-    def __init__(self, camera, anchors, show_stats=False):
+    def __init__(self, camera, show_stats=False):
         self.camera = camera
-        self.anchors = anchors
         self.show_stats = show_stats
-        self.model = AkidaModel(filename=YOLO_FBZ)
+        self.yolo_model = INITIAL_YOLO_MODEL
         self.pred_boxes = []
         self.active = False
 
         # start the thread
-        self.thread = threading.Thread(target=self.infer)
+        self.thread = threading.Thread(target=self.infer, daemon=True)
         self.thread.start()
 
     def set_active(self):
-        print("YOLO Active")
+        print(f"{self.yolo_model} Active")
+        self.model = AkidaModel(filename=YOLO_SETTINGS[self.yolo_model]["model_file"])
+        self.anchors = YOLO_SETTINGS[self.yolo_model]["anchors"]
+        self.labels = YOLO_SETTINGS[self.yolo_model]["labels"]
         self.active = True
         self.camera.terminator_vision = True
         self.map_hardware()
@@ -404,7 +480,7 @@ class YOLOInference:
             if self.show_stats:
                 device.soc.power_measurement_enabled = True
             self.model.map(device, hw_only=True)
-            print("Yolo mapped to Akida device")
+            print(f"{self.yolo_model} mapped to Akida device")
 
     def infer(self):
         while True:
@@ -418,8 +494,8 @@ class YOLOInference:
     def yolo_infer(self, input_array):
         pots = self.model.predict(input_array)[0]
         w, h, c = pots.shape
-        pots = pots.reshape((h, w, len(self.anchors), 4 + 1 + len(LABELS)))
-        raw_boxes = decode_output(pots, self.anchors, len(LABELS))
+        pots = pots.reshape((h, w, len(self.anchors), 4 + 1 + len(self.labels)))
+        raw_boxes = decode_output(pots, self.anchors, len(self.labels))
         pred_boxes = [
             [
                 box.x1 * FRAME_WIDTH,
@@ -439,19 +515,18 @@ class VWWInference:
     def __init__(self, camera, show_stats=False):
         self.camera = camera
         self.show_stats = show_stats
-        self.model = AkidaModel(filename=VWW_FBZ)
+        self.model = AkidaModel(filename=f"models/{VWW}.fbz")
         self.person_detected = False
         self.person_detected_confidence = 0
         self.active = False
 
         # start the thread
-        self.thread = threading.Thread(target=self.infer)
+        self.thread = threading.Thread(target=self.infer, daemon=True)
         self.thread.start()
 
     def set_active(self):
         print("VWW Active")
         self.active = True
-        self.camera.set_pred_boxes([])
         self.person_detected = False
         self.map_hardware()
 
@@ -469,6 +544,7 @@ class VWWInference:
     def infer(self):
         while True:
             if self.active:
+                self.camera.set_pred_boxes([])
                 input_array = self.camera.get_input_array(96, 96)
                 if self.model:
                     self.vww_infer(input_array)
@@ -476,9 +552,9 @@ class VWWInference:
                     print(self.model.statistics)
 
     def vww_infer(self, input_array):
-        prediction = self.model.predict(input_array).reshape(-1)
+        prediction = self.model.forward(input_array).reshape(-1)
         probabilities = self.softmax(prediction)
-        self.person_detected = probabilities[1] > VWW_THRESHOLD
+        self.person_detected = probabilities[1] > VWW_CONFIDENCE_THRESHOLD
         self.person_detected_confidence = probabilities[1]
 
     @staticmethod
@@ -489,45 +565,43 @@ class VWWInference:
 
 class Sentry:
     def __init__(self):
+        self.led_strip = WS2812Controller(pin=LED_PIN, num_leds=NUM_LEDS)
         self.camera = Camera()
         self.vision = Vision(OPENAI_API_KEY)
         self.vww_inference = VWWInference(self.camera)
-        self.yolo_inference = YOLOInference(self.camera, ANCHORS)
+        self.yolo_inference = YOLOInference(self.camera)
         self.security_level = SecurityLevel.LOW
         self.timer = None
         self.report_timer = None
         self.running = True
+        self.reporting = False
+
+        threading.Thread(target=self.observe, daemon=True).start()
+        threading.Thread(target=self.report, daemon=True).start()
 
         self.vww_inference.set_active()
 
-        threading.Thread(target=self.monitor, daemon=True).start()
-
-    def monitor(self):
+    def observe(self):
+        
         while self.running:
             if self.vww_inference.person_detected:
-                # Disable VWW and enable YOLO when a person is detected
-                if not self.yolo_inference.active:
-                    self.vww_inference.set_inactive()
-                    self.yolo_inference.set_active()
-                    self.set_security_level(SecurityLevel.HIGH)
-                    self.start_security_report_timer()
 
-                    self.timer = threading.Timer(30, self.reset_security_level)
+                if self.security_level != SecurityLevel.HIGH:                    
+                    self.set_security_level(SecurityLevel.HIGH)
+                    
+                    self.timer = threading.Timer(SECURITY_RESET_TIMEOUT, self.reset_security_level)
                     self.timer.start()
 
             time.sleep(1)
 
-    def start_security_report_timer(self):
-        # Cancel existing report timer if running
-        if self.report_timer:
-            self.report_timer.cancel()
+    def report(self):
 
-        # Start a new report timer that executes every 5 seconds
-        self.report_timer = threading.Timer(5, self.generate_security_report)
-        self.report_timer.start()
-
-    def generate_security_report(self):
-        self.get_security_report()
+        while self.running:
+            if self.reporting:
+                self.get_security_report()
+                time.sleep(REPORT_EVERY_X_SECONDS)
+            else:
+                time.sleep(1)
 
     def get_security_report(self):
         report = self.vision.ask_openai(self.camera.get_frame())
@@ -540,23 +614,32 @@ class Sentry:
             self.security_level = level
             print(f"Security Level set to {level}")
 
+            if level == SecurityLevel.HIGH:
+                # Disable VWW and enable YOLO when a person is detected
+                self.reporting = True
+                self.vww_inference.set_inactive()
+                self.yolo_inference.set_active()
+                self.led_strip.start_alarm()
+
+            elif level == SecurityLevel.LOW:
+                self.reporting = False
+                self.yolo_inference.set_inactive()
+                self.vww_inference.set_active()
+                self.led_strip.stop_alarm()
+
     def reset_security_level(self):
+        print("Security level reset")
         # Reset the security level and swap to VWW detection
         self.vww_inference.person_detected = False
-        print(f"Security Level reset to {SecurityLevel.LOW}")
         self.set_security_level(SecurityLevel.LOW)
-        self.yolo_inference.set_inactive()
         self.yolo_inference.pred_boxes = []
-        self.vww_inference.set_active()
-        if self.report_timer:
-            self.report_timer.cancel()
+        self.camera.set_pred_boxes([])
 
     def stop(self):
         self.running = False
+        self.led_strip.cleanup()
         if self.timer:
             self.timer.cancel()
-        if self.report_timer:
-            self.report_timer.cancel()
 
 
 def main():

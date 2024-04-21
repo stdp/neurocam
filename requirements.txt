@@ -1,3 +1,4 @@
 akida
 akida-models
 python-dotenv
+rpi_ws281x
