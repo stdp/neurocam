@@ -47,7 +47,7 @@ The system runs the Visual Wake Word model for low power monitoring of a feed. W
 
 2. Clone the repository:
    ```bash
-    git clone https://github.com/yourusername/neurocam.git
+    git clone https://github.com/stdp/neurocam.git
     cd neurocam
     ```
 
