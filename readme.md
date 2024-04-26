@@ -14,13 +14,13 @@ The frame includes one male individual, appearing in his mid-30s, with short dar
 Security Level: HIGH
 ```
 
-The system runs the Visual Wake Word model for low power monitoring of a feed. When a person is detected, it switches to Yolo for person object tracking. Terminator vision is optional and enabled when detecting the location of persons in the frame. When the security level is set to high, the RGB LEDs are triggered and flash red and blue (epilepsy warning).
+The system runs the Visual Wake Word model for low power monitoring of a feed. When a person is detected, it switches to Yolo for person object tracking. By default it will also estimate the age of each face that is extracted. Terminator vision is optional and enabled when detecting the location of persons in the frame. When the security level is set to high, the RGB LEDs are triggered and flash red and blue (epilepsy warning).
 
 ![Terminator Vision](https://i.imgur.com/XgUF3Cs.png)
 
 ## Features
 - **Real-Time Person Detection**: Utilises the Akida neuromorphic processor for efficient and rapid person detection.
-- **Real-Time Face Detection**: Utilises the Akida neuromorphic processor for efficient and rapid face detection.
+- **Real-Time Face Detection**: Utilises the Akida neuromorphic processor for efficient and rapid face detection. Age can be predicted for each extracted face.
 - **Enhanced Security Reports**: Generates detailed security reports using ChatGPT-4, providing insights and alerts based on detected activities.
 - **Optimized for Raspberry Pi**: Specifically designed to run on Raspberry Pi 4 with a Raspberry Pi Camera, integrating seamlessly with hardware capabilities.
 - **Terminator Vision**: When a person is detected in frame it will switch to Terminator vision, the sweet red hue from the Terminator movies.
