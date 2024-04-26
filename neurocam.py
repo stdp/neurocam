@@ -12,9 +12,12 @@ from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
 
 from akida import Model as AkidaModel, devices
+from akida.core.soc import ClockMode
 from akida_models.detection.processing import (
     decode_output,
 )
+import tensorflow as tf
+from tensorflow.image import resize_with_crop_or_pad
 import numpy as np
 
 load_dotenv()
@@ -37,10 +40,13 @@ REPORT_EVERY_X_SECONDS = 10
 
 YOLO_CONFIDENCE_MIN = 0.6
 VWW_CONFIDENCE_THRESHOLD = 0.5
+EST_AGE_ENABLED = True
 
 YOLO = "yolo"
 YOLO_FACE = "yolo_face"
 VWW = "vww"
+FACE_IDENTIFICATION = "face_identification"
+AGE = "age"
 
 INITIAL_YOLO_MODEL = YOLO_FACE
 
@@ -429,14 +435,20 @@ class Camera:
         for box in self.pred_boxes:
             if box[5] > YOLO_CONFIDENCE_MIN:
                 x1, y1 = int(box[0]), int(box[1])
-                x2, y2 = int(box[2]), int(box[3])
+                x2, y2 = int(box[2]), int(box[3])                
                 label = YOLO_SETTINGS[self.yolo_model]["labels"][int(box[4])]
-                score = "{:.2%}".format(box[5])
                 colour = YOLO_SETTINGS[self.yolo_model]["colours"][label]
+
+                age_label = ""
+                if len(box) > 6 and EST_AGE_ENABLED:
+                    age_label = f"- Age: {box[6]} years"
+
+                score = "{:.2%}".format(box[5])
+                
                 frame = cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 1)
                 cv2.putText(
                     frame,
-                    "{} - {}".format(label, score),
+                    "{} - {} {}".format(label, score, age_label),
                     (x1, y1 - 5),
                     cv2.FONT_HERSHEY_COMPLEX_SMALL,
                     0.4,
@@ -448,13 +460,116 @@ class Camera:
         return frame
 
 
-class YOLOInference:
+class AgeEstimationInference:
     def __init__(self, camera, show_stats=False):
         self.camera = camera
+        self.show_stats = show_stats
+        self.model = AkidaModel(filename=f"models/{AGE}.fbz")
+
+    def process_faces(self, pred_boxes):
+        self.map_hardware()
+        faces = pred_boxes
+        processed_faces = []
+
+        if len(faces) > 0:
+            for face in faces:
+                processed_face = self.process_face(face, 32, 32)
+                prediction = self.model.forward(processed_face).reshape(-1)
+
+                if self.show_stats:
+                    print(self.model.statistics)
+
+                processed_faces.append(prediction[0])
+
+            return processed_faces
+
+    def map_hardware(self):
+        if len(devices()) > 0:
+            device = devices()[0]
+            if self.show_stats:
+                device.soc.power_measurement_enabled = True
+            device.soc.clock_mode = ClockMode.Performance
+            self.model.map(device, hw_only=True)
+            print(f"{AGE} mapped to Akida device")
+
+    @staticmethod
+    def process_face(input_array, target_width, target_height):
+        """
+        Processes an image by resizing it with either cropping or padding to a target width and height, 
+        expanding its dimensions, and converting its data type to uint8.
+
+        Args:
+        input_array (np.array or tf.Tensor): The input image array or tensor.
+        target_width (int): The desired width of the output image.
+        target_height (int): The desired height of the output image.
+
+        Returns:
+        np.array: The processed image array.
+        """
+
+        # Resize the input array with cropping or padding
+        input_array = resize_with_crop_or_pad(input_array, target_width, target_height)
+
+        # Check if input_array is a TensorFlow tensor and convert it to a NumPy array if necessary
+        if isinstance(input_array, tf.Tensor):
+            input_array = input_array.numpy()
+
+        # Expand the dimensions of the array to add a batch dimension if not already present
+        if input_array.ndim == 3:
+            expanded_array = np.expand_dims(input_array, axis=0)
+        else:
+            expanded_array = input_array  # Assume it's already batched
+
+        # Convert the array data type to uint8
+        int8_array = expanded_array.astype("uint8")
+
+        return int8_array
+
+
+class FaceIdentificationInference:
+    def __init__(self, camera, show_stats=False):
+        self.camera = camera
+        self.show_stats = show_stats
+        self.model = AkidaModel(filename=f"models/{FACE_IDENTIFICATION}.fbz")
+
+    def set_active(self):
+        print(f"{self.model} Active")
+        self.active = True
+        self.map_hardware()
+
+    def set_inactive(self):
+        self.active = False
+
+    def map_hardware(self):
+        if len(devices()) > 0:
+            device = devices()[0]
+            if self.show_stats:
+                device.soc.power_measurement_enabled = True
+            device.soc.clock_mode = ClockMode.Performance
+            self.model.map(device, hw_only=True)
+            print(f"{FACE_IDENTIFICATION} mapped to Akida device")
+
+    def infer(self, face_array):
+        pass
+
+    def learn(self, face_array):
+        pass
+
+    @staticmethod
+    def process_face(input_array, target_width, target_height):
+        pass
+
+
+class YOLOInference:
+    def __init__(self, camera, fps=60, show_stats=False):
+        self.camera = camera
+        self.fps = fps
         self.show_stats = show_stats
         self.yolo_model = INITIAL_YOLO_MODEL
         self.pred_boxes = []
         self.active = False
+
+        self.age_estimation = AgeEstimationInference(camera)
 
         # start the thread
         self.thread = threading.Thread(target=self.infer, daemon=True)
@@ -479,6 +594,7 @@ class YOLOInference:
             device = devices()[0]
             if self.show_stats:
                 device.soc.power_measurement_enabled = True
+            device.soc.clock_mode = ClockMode.Performance
             self.model.map(device, hw_only=True)
             print(f"{self.yolo_model} mapped to Akida device")
 
@@ -490,6 +606,7 @@ class YOLOInference:
                     self.yolo_infer(input_array)
                 if self.show_stats:
                     print(self.model.statistics)
+            time.sleep(1 / self.fps)
 
     def yolo_infer(self, input_array):
         pots = self.model.predict(input_array)[0]
@@ -507,13 +624,57 @@ class YOLOInference:
             ]
             for box in raw_boxes
         ]
+
+        if len(pred_boxes) > 0 and self.yolo_model == YOLO_FACE and EST_AGE_ENABLED:
+            extracted_faces = []
+            for bbox in pred_boxes:
+                face = self.extract_roi(input_array, bbox)
+                if face is not None:
+                    extracted_faces.append(face)
+
+            if len(extracted_faces) > 0:
+                age_predictions = self.age_estimation.process_faces(extracted_faces)
+                self.map_hardware()
+
+                # Adding age predictions to each corresponding box in pred_boxes
+                for i, age in enumerate(age_predictions):
+                    if i < len(pred_boxes):
+                        pred_boxes[i].append(age)
+
         self.pred_boxes = pred_boxes
         self.camera.set_pred_boxes(pred_boxes)
 
+    @staticmethod
+    def extract_roi(input_array, bbox):
+        """
+        Extracts a region of interest from the input array based on the bounding box coordinates.
+        
+        Args:
+        input_array (np.array): The input image array.
+        bbox (list): A list containing the bounding box coordinates [x1, y1, x2, y2].
+        
+        Returns:
+        np.array: The cropped image array corresponding to the bounding box.
+        """
+        # Convert bbox values to integers, handle TensorFlow tensors if present
+        x1, y1, x2, y2 = [int(v.numpy() if hasattr(v, 'numpy') else v) for v in bbox[:4]]
+        
+        # Ensure that coordinates are within the bounds of the input image
+        x1 = max(0, min(x1, input_array.shape[1] - 1))
+        y1 = max(0, min(y1, input_array.shape[0] - 1))
+        x2 = max(0, min(x2, input_array.shape[1]))
+        y2 = max(0, min(y2, input_array.shape[0]))
+
+        # Extract the region of interest
+        cropped_image = input_array[y1:y2, x1:x2]
+
+        return cropped_image
+
 
 class VWWInference:
-    def __init__(self, camera, show_stats=False):
+    def __init__(self, camera, fps=1, show_stats=False):
         self.camera = camera
+        self.fps = fps
         self.show_stats = show_stats
         self.model = AkidaModel(filename=f"models/{VWW}.fbz")
         self.person_detected = False
@@ -538,6 +699,7 @@ class VWWInference:
             device = devices()[0]
             if self.show_stats:
                 device.soc.power_measurement_enabled = True
+            device.soc.clock_mode = ClockMode.LowPower
             self.model.map(device, hw_only=True)
             print("VWW mapped to Akida device")
 
@@ -550,6 +712,7 @@ class VWWInference:
                     self.vww_infer(input_array)
                 if self.show_stats:
                     print(self.model.statistics)
+            time.sleep(1 / self.fps)
 
     def vww_infer(self, input_array):
         prediction = self.model.forward(input_array).reshape(-1)
